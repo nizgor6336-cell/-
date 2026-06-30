@@ -1,0 +1,112 @@
+#!/bin/bash
+
+validate_octet() {
+    local num="$1"
+    if [[ "$num" =~ ^[0-9]{1,3}$ ]] && (( num >= 0 && num <= 255 )); then
+        return 0
+    else
+        return 1
+    fi
+}
+
+
+validate_prefix() {
+    local prefix="$1"
+    if [[ "$prefix" =~ ^([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+        local oct1="${BASH_REMATCH[1]}"
+        local oct2="${BASH_REMATCH[2]}"
+        if validate_octet "$oct1" && validate_octet "$oct2"; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+
+scan_ip() {
+    local ip="$1"
+    echo "[*] Scanning IP : $ip"
+    arping -c 3 -i "$INTERFACE" "$ip" 2> /dev/null
+}
+
+
+if [[ $EUID -ne 0 ]]; then
+    echo "Error: This script must be run as root (use sudo)." >&2
+    exit 1
+fi
+
+
+if [[ $# -lt 2 ]]; then
+    echo "Usage: $0 PREFIX INTERFACE [SUBNET] [HOST]"
+    echo "  PREFIX    - first two octets, e.g. 192.168"
+    echo "  INTERFACE - network interface, e.g. eth0"
+    echo "  SUBNET    - optional third octet (1-255)"
+    echo "  HOST      - optional fourth octet (1-255), requires SUBNET"
+    exit 1
+fi
+
+PREFIX="$1"
+INTERFACE="$2"
+SUBNET="${3:-}"
+HOST="${4:-}"
+
+if ! validate_prefix "$PREFIX"; then
+    echo "Error: PREFIX must be two octets (0-255.0-255), e.g. 192.168" >&2
+ exit 1
+fi
+
+
+if ! ip link show "$INTERFACE" >/dev/null 2>&1; then
+    echo "Error: Interface '$INTERFACE' does not exist." >&2
+    exit 1
+fi
+
+
+if [[ -n "$HOST" && -z "$SUBNET" ]]; then
+    echo "Error: HOST requires SUBNET to be specified." >&2
+    exit 1
+fi
+
+
+if [[ -n "$SUBNET" ]]; then
+    if ! validate_octet "$SUBNET"; then
+        echo "Error: SUBNET must be a number between 0 and 255." >&2
+        exit 1
+    fi
+fi
+
+
+if [[ -n "$HOST" ]]; then
+    if ! validate_octet "$HOST"; then
+        echo "Error: HOST must be a number between 0 and 255." >&2
+        exit 1
+    fi
+fi
+
+
+if [[ -z "$SUBNET" ]]; then
+    subnet_list=()
+    for ((s=1; s<=255; s++)); do
+        subnet_list+=("$s")
+    done
+else
+    subnet_list=("$SUBNET")
+fi
+
+if [[ -z "$HOST" ]]; then
+    host_list=()
+    for ((h=1; h<=255; h++)); do
+        host_list+=("$h")
+    done
+else
+    host_list=("$HOST")
+fi
+
+for subnet in "${subnet_list[@]}"; do
+    for host in "${host_list[@]}"; do
+        ip="${PREFIX}.${subnet}.${host}"
+  scan_ip "$ip"
+    done
+done
+
+
