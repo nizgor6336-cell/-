@@ -1,0 +1,99 @@
+#!/bin/bash
+PROC_DIR="/proc"
+PREV_PID_FILE="/var/tmp/prev_pids_$USER"
+LOG_FILE="/var/log/new_processes.log"
+PARAMS=(1 2 3 4)
+if [[ ! -d "$PROC_DIR" ]]; then
+    echo "$(date): Ошибка: директория $PROC_DIR не найдена." >> "$LOG_FILE"
+    exit 1
+fi
+get_param_value() {
+    local pid=$1
+    local param=$2
+    case $param in
+        1) # cmdline
+            if [[ -r "$PROC_DIR/$pid/cmdline" ]]; then
+                tr '\0' ' ' < "$PROC_DIR/$pid/cmdline" 2>/dev/null
+            else
+                echo "[недоступен]"
+            fi ;;
+        2) # environ
+            if [[ -r "$PROC_DIR/$pid/environ" ]]; then
+                tr '\0' ' ' < "$PROC_DIR/$pid/environ" 2>/dev/null
+            else
+                echo "[недоступен]"
+            fi ;;
+        3) # limits
+            if [[ -r "$PROC_DIR/$pid/limits" ]]; then
+                local first_line=$(head -1 "$PROC_DIR/$pid/limits" 2>/dev/null)
+                local total_lines=$(wc -l < "$PROC_DIR/$pid/limits" 2>/dev/null)
+                echo "${first_line:-[недоступен]} [строк: ${total_lines:-0}]"
+            else
+                echo "[недоступен]"
+            fi ;;
+        4) # mounts
+            if [[ -r "$PROC_DIR/$pid/mounts" ]]; then
+                local first_line=$(head -1 "$PROC_DIR/$pid/mounts" 2>/dev/null)
+                local total_lines=$(wc -l < "$PROC_DIR/$pid/mounts" 2>/dev/null)
+                echo "${first_line:-[недоступен]} [строк: ${total_lines:-0}]"
+            else
+                echo "[недоступен]"
+            fi ;;
+        *) echo "[неизвестный параметр]" ;;
+    esac
+}
+current_pids=()
+for dir in "$PROC_DIR"/*/; do
+    pid="${dir%/}"; pid="${pid##*/}"
+    if [[ "$pid" =~ ^[0-9]+$ ]]; then
+        current_pids+=("$pid")
+    fi
+done
+IFS=$'\n' current_pids=($(sort -n <<<"${current_pids[*]}")); unset IFS
+prev_pids=()
+if [[ -f "$PREV_PID_FILE" ]]; then
+    mapfile -t prev_pids < "$PREV_PID_FILE"
+fi
+new_pids=()
+for pid in "${current_pids[@]}"; do
+    found=false
+    for prev in "${prev_pids[@]}"; do
+        if [[ "$pid" == "$prev" ]]; then
+            found=true
+            break
+        fi
+    done
+    if ! $found; then
+        new_pids+=("$pid")
+    fi
+done
+if [[ ${#new_pids[@]} -gt 0 ]]; then
+    {
+        echo "===== $(date '+%Y-%m-%d %H:%M:%S') ====="
+        printf "%-8s %-40s %s\n" "PID" "EXE" "CMDLINE ENVIRON LIMITS MOUNTS"
+        echo "----------------------------------------------------------------------------------------------------"
+        for pid in "${new_pids[@]}"; do
+            exe_path="$PROC_DIR/$pid/exe"
+            if [[ -r "$exe_path" ]]; then
+                exe=$(readlink "$exe_path" 2>/dev/null)
+                [[ -z "$exe" ]] && exe="[неизвестно]"
+            else
+                exe="[недоступен]"
+            fi
+            param_str=""
+            for p in "${PARAMS[@]}"; do
+                val=$(get_param_value "$pid" "$p")
+                val=$(echo "$val" | tr '\n' ' ' | tr -s ' ')
+                if [[ ${#val} -gt 50 ]]; then
+                    val="${val:0:47}..."
+                fi
+                param_str+=" $val |"
+            done
+            param_str="${param_str% |}" 
+
+            printf "%-8s %-40s %s\n" "$pid" "$exe" "$param_str"
+        done
+        echo ""
+    } >> "$LOG_FILE"
+fi
+printf "%s\n" "${current_pids[@]}" > "$PREV_PID_FILE"
