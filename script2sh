@@ -1,0 +1,129 @@
+#!/bin/bash
+LOGFILE="input_devices.log" 
+KNOWN_FILE=".known_devices" 
+extract_value() {
+    local str="$1"
+    local prefix="$2="
+    local val="${str#$prefix}"
+    val="${val#\"}"
+    val="${val%\"}"
+    echo "$val"
+}
+get_device_id() {
+    local bus="$1"
+    local name="$2"
+    local phys="$3"
+    echo "${bus}|${name}|${phys}"
+}
+parse_block_to_vars() {
+    local lines=("$@")
+    local bus="" name="" phys="" handlers="" ev="" key="" rel="" abs="" msc="" led=""
+
+    for line in "${lines[@]}"; do
+        [[ -z "$line" ]] && continue
+        local key_field="${line%%:*}"
+        local value="${line#*: }"
+
+        case "$key_field" in
+            I) bus=$(extract_value "$value" "Bus") ;;
+            N) name=$(extract_value "$value" "Name") ;;
+            P) phys=$(extract_value "$value" "Phys") ;;
+            H) handlers=$(extract_value "$value" "Handlers") ;;
+            B)
+                for pair in $value; do
+                    if [[ "$pair" == *"="* ]]; then
+                        subkey="${pair%%=*}"
+                        subval="${pair#*=}"
+                        case "$subkey" in
+                            EV)  ev="$subval"  ;;
+                            KEY) key="$subval" ;;
+                            REL) rel="$subval" ;;
+                            ABS) abs="$subval" ;;
+                            MSC) msc="$subval" ;;
+                            LED) led="$subval" ;;
+                        esac
+                    fi
+                done
+                ;;
+        esac
+    done
+    DEV_BUS="$bus"
+    DEV_NAME="$name"
+    DEV_PHYS="$phys"
+    DEV_HANDLERS="$handlers"
+    DEV_EV="$ev"
+    DEV_KEY="$key"
+    DEV_ID=$(get_device_id "$bus" "$name" "$phys")
+}
+echo "=== Содержимое каталога /proc/bus/input/ ==="
+ls -la /proc/bus/input/
+
+echo
+echo "=== Информация об устройствах ввода (разбор по столбцам) ==="
+
+if [[ ! -f /proc/bus/input/devices ]]; then
+    echo "Файл /proc/bus/input/devices не найден."
+    exit 1
+fi
+printf "%-10s | %-30s | %-20s | %-10s | %-20s\n" \
+       "Bus" "Name" "Handlers" "EV" "KEY"
+printf "%s\n" "---------------------------------------------------------------"
+TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
+echo "[$TIMESTAMP] Запуск скрипта" >> "$LOGFILE"
+
+declare -A known_ids
+if [[ -f "$KNOWN_FILE" ]]; then
+    while IFS= read -r id; do
+        [[ -n "$id" ]] && known_ids["$id"]=1
+    done < "$KNOWN_FILE"
+fi
+new_ids=()
+block=()
+new_devices_found=0
+while IFS= read -r line; do
+    if [[ -z "$line" ]]; then
+        if [[ ${#block[@]} -gt 0 ]]; then
+            parse_block_to_vars "${block[@]}"
+            printf "%-10s | %-30s | %-20s | %-10s | %-20s\n" \
+                   "$DEV_BUS" "$DEV_NAME" "$DEV_HANDLERS" "$DEV_EV" "$DEV_KEY"
+            if [[ -z "${known_ids[$DEV_ID]}" ]]; then
+                ((new_devices_found++))
+                echo "[$TIMESTAMP] НОВОЕ УСТРОЙСТВО: $DEV_ID" >> "$LOGFILE"
+                echo "    Bus: $DEV_BUS, Name: $DEV_NAME, Phys: $DEV_PHYS, Handlers: $DEV_HANDLERS" >> "$LOGFILE"
+                new_ids+=("$DEV_ID")
+            fi
+
+            block=()
+        fi
+    else
+        block+=("$line")
+    fi
+done < /proc/bus/input/devices
+if [[ ${#block[@]} -gt 0 ]]; then
+    parse_block_to_vars "${block[@]}"
+    printf "%-10s | %-30s | %-20s | %-10s | %-20s\n" \
+           "$DEV_BUS" "$DEV_NAME" "$DEV_HANDLERS" "$DEV_EV" "$DEV_KEY"
+    if [[ -z "${known_ids[$DEV_ID]}" ]]; then
+        ((new_devices_found++))
+        echo "[$TIMESTAMP] НОВОЕ УСТРОЙСТВО: $DEV_ID" >> "$LOGFILE"
+        echo "    Bus: $DEV_BUS, Name: $DEV_NAME, Phys: $DEV_PHYS, Handlers: $DEV_HANDLERS" >> "$LOGFILE"
+        new_ids+=("$DEV_ID")
+    fi
+fi
+if [[ ${#new_ids[@]} -gt 0 ]]; then
+    for id in "${!known_ids[@]}"; do
+        echo "$id" >> "$KNOWN_FILE.tmp"
+    done
+    for id in "${new_ids[@]}"; do
+        echo "$id" >> "$KNOWN_FILE.tmp"
+    done
+    sort -u "$KNOWN_FILE.tmp" > "$KNOWN_FILE"
+    rm -f "$KNOWN_FILE.tmp"
+fi
+if [[ $new_devices_found -eq 0 ]]; then
+    echo "[$TIMESTAMP] Новых устройств не обнаружено." >> "$LOGFILE"
+else
+    echo "[$TIMESTAMP] Найдено новых устройств: $new_devices_found" >> "$LOGFILE"
+fi
+echo
+echo "Лог записан в $LOGFILE"
