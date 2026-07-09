@@ -1,0 +1,75 @@
+#!/bin/bash
+BASE_DIR="$HOME/process_monitor"
+LOGFILE="$BASE_DIR/new_processes.log"
+KNOWN_PIDS_FILE="$BASE_DIR/known_pids.list"
+LOCKFILE="$BASE_DIR/watch_new_processes.lock"
+
+mkdir -p "$BASE_DIR" 2>/dev/null || {
+    echo "Ошибка: не могу создать директорию $BASE_DIR" >&2
+    exit 1
+}
+
+exec 200>"$LOCKFILE"
+if ! flock -n 200; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') Скрипт уже запущен, выходим." >> "$LOGFILE"
+    echo "Скрипт уже запущен (см. лог)." >&2
+    exit 0
+fi
+get_current_pids() {
+    for pid in /proc/[0-9]*; do
+        if [[ -d "$pid" && -r "$pid/status" ]]; then
+            basename "$pid"
+        fi
+    done | sort -n
+}
+
+get_cmdline() {
+    local pid=$1
+    local cmd
+    if [[ -r "/proc/$pid/cmdline" ]]; then
+        cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        if [[ -z "$cmd" ]]; then
+            cmd=$(cat "/proc/$pid/comm" 2>/dev/null)
+        fi
+    else
+        cmd="<недоступно>"
+    fi
+    echo "$cmd"
+}
+declare -A known_map
+if [[ -f "$KNOWN_PIDS_FILE" ]]; then
+    while IFS= read -r pid; do
+        known_map["$pid"]=1
+    done < "$KNOWN_PIDS_FILE"
+fi
+current_pids=()
+while IFS= read -r pid; do
+    current_pids+=("$pid")
+done < <(get_current_pids)
+
+new_pids=()
+timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+echo "=== Мониторинг новых процессов ==="
+echo "Время запуска: $timestamp"
+echo "Лог-файл: $LOGFILE"
+echo
+for pid in "${current_pids[@]}"; do
+    if [[ -z "${known_map[$pid]}" ]]; then
+        new_pids+=("$pid")
+        cmd=$(get_cmdline "$pid")
+        echo "[$timestamp] НОВЫЙ ПРОЦЕСС: PID=$pid, CMD=$cmd" >> "$LOGFILE"
+    fi
+done
+if [[ ${#new_pids[@]} -eq 0 ]]; then
+    echo "Новых процессов не обнаружено."
+    echo "[$timestamp] Новых процессов не обнаружено." >> "$LOGFILE"
+else
+    echo "Найдено новых процессов: ${#new_pids[@]}"
+    echo "Список новых PID: ${new_pids[*]}"
+    echo "Подробности записаны в лог."
+    echo "[$timestamp] Обнаружено новых процессов: ${#new_pids[@]}" >> "$LOGFILE"
+fi
+printf "%s\n" "${current_pids[@]}" | sort -n > "$KNOWN_PIDS_FILE.tmp"
+mv "$KNOWN_PIDS_FILE.tmp" "$KNOWN_PIDS_FILE"
+echo
+echo "Готово. Полный лог: $LOGFILE"
